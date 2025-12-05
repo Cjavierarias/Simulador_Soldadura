@@ -3,527 +3,445 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-  <title>SoldarAR — Entrenador de movimiento</title>
+  <title>Simulador Soldadura — Fix</title>
 
-  <!-- A-Frame + AR.js (A-Frame build) -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/aframe/1.4.0/aframe.min.js"></script>
-  <script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js"></script>
+  <!-- A-Frame (versión compatible) -->
+  <script src="https://aframe.io/releases/1.2.0/aframe.min.js"></script>
+  <!-- AR.js compatible con A-Frame 1.2.0 -->
+  <script src="https://cdn.jsdelivr.net/gh/AR-js-org/AR.js@3.3.2/aframe/build/aframe-ar.js"></script>
 
-  <!-- OpenCV.js: reemplaza si tu host local lo exige -->
-  <!-- Si hay problemas con este CDN, descarga opencv.js y sirve localmente -->
-  <script async src="https://docs.opencv.org/4.x/opencv.js" onload="cvReady()"></script>
+  <!-- OpenCV.js: se usará cv.onRuntimeInitialized; si tu build no incluye calib3d se usará fallback -->
+  <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
 
   <style>
-    html,body { margin:0; height:100%; background:#111; color:#eee; font-family:Inter,Arial,Helvetica,sans-serif; }
-    #ui { position: absolute; left: 10px; top:10px; z-index: 50; max-width: 40%; min-width: 240px; background: rgba(0,0,0,0.45); padding:10px; border-radius:10px; }
-    #bigOverlay { position:absolute; right: 10px; top:10px; z-index: 50; background: rgba(0,0,0,0.25); padding:10px; border-radius:10px; color:#fff; min-width:160px; text-align:center; }
-    .bar { height: 12px; border-radius:6px; background:#444; margin:6px 0; overflow:hidden; }
-    .bar > i { display:block; height:100%; width:0%; }
-    #status { font-size:13px; }
-    button { padding:8px 12px; border-radius:8px; border: none; background:#0a84ff; color:white; font-weight:600; margin:6px 4px; }
-    #holdBtn { background: linear-gradient(90deg,#ff7a00,#ff0044); padding:12px 18px; font-size:16px; border-radius:12px; }
-    #canvasOut { display:none; } /* usado internamente para OpenCV processing */
-    .small { font-size:12px; opacity:0.9; }
-    #help { font-size:13px; margin-top:8px; color:#ccc; }
+    html,body { height:100%; margin:0; background:#111; color:#eee; font-family:Arial,Helvetica,sans-serif; }
+    #videoWrap { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:#000; z-index:1; }
+    video#videoInput { width:100%; height:100%; object-fit:cover; background:#000; }
+    #ui { position: absolute; left:10px; top:10px; z-index:999; background: rgba(0,0,0,0.55); padding:10px; border-radius:10px; min-width:260px; }
+    button { padding:8px 12px; border-radius:8px; border: none; background:#0a84ff; color:white; font-weight:600; margin:4px 2px; }
+    #status { margin-top:6px; font-size:13px; color:#ffd; }
+    #errors { color:#ff9a9a; font-size:13px; margin-top:6px; white-space:pre-wrap; max-height:100px; overflow:auto; }
+    .small { font-size:12px; color:#ccc; }
+    #angleBar { height:12px; border-radius:6px; background:#444; margin-top:6px; overflow:hidden; }
+    #angleBar > i { display:block; height:100%; width:0%; background:green; }
+    #canvasOut { display:none; }
   </style>
 </head>
 <body>
-
-  <!-- A-Frame scene for AR overlay + camera feed -->
-  <a-scene embedded arjs='sourceType: webcam; debugUIEnabled: false;' vr-mode-ui="enabled: false">
+  <!-- A-Frame scene (overlay AR) -->
+  <a-scene embedded arjs='sourceType: webcam; debugUIEnabled: false;' vr-mode-ui="enabled: false" style="position:fixed; inset:0; z-index:2; pointer-events:none;">
     <a-entity camera></a-entity>
-    <!-- Podrías añadir modelos AR aquí, pero las métricas las dibujamos en canvas HTML -->
   </a-scene>
 
-  <!-- UI overlay -->
+  <div id="videoWrap">
+    <video id="videoInput" playsinline autoplay muted></video>
+  </div>
+
   <div id="ui">
-    <div id="status">Cargando librerías... <span id="libStatus"></span></div>
+    <div style="font-weight:800">Simulador Soldadura — Fix</div>
+    <div class="small">Patrón: configurable (4×4 ejemplo)</div>
+    <div style="margin-top:8px;">
+      <button id="btnStart">Iniciar cámara</button>
+      <button id="btnStop">Detener cámara</button>
+      <button id="btnCalib">Calibración rápida</button>
+      <button id="btnDownload">Descargar log</button>
+    </div>
 
-    <div id="metrics" style="display:none;">
-      <div><strong>Ángulo actual:</strong> <span id="angleVal">—</span>°</div>
-      <div><strong>Velocidad (trasl.):</strong> <span id="speedVal">—</span> mm/s</div>
-      <div><strong>Distancia (Z):</strong> <span id="distVal">—</span> mm</div>
+    <div id="status">Estado: esperando</div>
+    <div id="errors"></div>
 
-      <div class="bar"><i id="angleBar" style="width:0%; background:green;"></i></div>
+    <div id="metrics" style="margin-top:8px; display:none;">
+      <div><strong>Ángulo:</strong> <span id="angleVal">—</span>°</div>
+      <div><strong>Vel (mm/s):</strong> <span id="speedVal">—</span></div>
+      <div><strong>Dist Z (mm):</strong> <span id="distVal">—</span></div>
+      <div id="angleBar"><i id="angleFill"></i></div>
       <div id="bigState" class="small">Estado: —</div>
-
-      <div style="margin-top:8px;">
-        <button id="startCalib">Calibrar cámara (rápida)</button>
-        <button id="downloadLog">Descargar log</button>
-      </div>
-      <div style="margin-top:8px">
-        <button id="holdBtn">Sostener para soldar (touch)</button>
-      </div>
-      <div id="help">Patrón: 4×4 impreso. Mantener el patrón claramente visible y plano.</div>
     </div>
   </div>
 
-  <div id="bigOverlay" style="display:none;">
-    <div style="font-weight:700">SoldarAR</div>
-    <div class="small">Indicadores en vivo</div>
-  </div>
-
-  <!-- Hidden canvas para procesado OpenCV -->
   <canvas id="canvasOut"></canvas>
 
-  <script>
-  /**************************************************************************
-   * CONFIGURACIÓN
-   **************************************************************************/
-  const cfg = {
-    // Patrón: si imprimiste 4x4 cuadrados, el número de esquinas internas es 3x3
-    patternCols: 3,      // columnas internas (esquinas) del patrón de control
-    patternRows: 3,      // filas internas
-    squareSizeMM: 100.0, // tamaño de cada cuadrado en mm (ajustar al imprimir)
-    angleMin: -10,       // ángulo mínimo recomendado (deg) - ejemplo
-    angleMax: 10,        // ángulo máximo recomendado (deg)
-    sampleIntervalMs: 50, // frecuencia de muestreo para velocidades
-    smoothingAlpha: 0.6, // suavizado para lecturas
-  };
+<script>
+/* =========================
+   CONFIG
+   ========================= */
+const cfg = {
+  patternCols: 3, // esquinas internas (para patrón 4x4 cuadrados -> 3x3)
+  patternRows: 3,
+  squareSizeMM: 100.0, // ajustar al patrón real
+  angleMin: -10, angleMax: 10,
+  sampleMs: 60,
+  smoothingAlpha: 0.6
+};
 
-  // Variables runtime
-  let cvReadyFlag = false;
-  let videoStream = null;
-  let processing = false;
-  let lastPose = null;
-  let poseHistory = [];
-  let log = [];
-  let evaluating = false;
-  let audioCtx, highOsc, lowOsc, weldNoiseNode;
-  let cameraMatrix = null; // si calibras, aquí va la cámara real
-  let distCoeffs = null;   // coeficientes de distorsión (se puede dejar a cero)
-  let lastTime = null;
+/* =========================
+   ESTADO RUNTIME
+   ========================= */
+let stream = null;
+let video = document.getElementById('videoInput');
+let canvas = document.getElementById('canvasOut');
+let ctx = canvas.getContext('2d', { willReadFrequently: true });
+let processing = false;
+let lastTime = null;
+let lastPose = null;
+let poseHistory = [];
+let evaluating = false;
+let logData = [];
+let cameraMatrix = null;
+let distCoeffs = null;
+let hasCalib3d = false;
 
-  // UI refs
-  const libStatus = document.getElementById('libStatus');
-  const metricsDiv = document.getElementById('metrics');
-  const angleVal = document.getElementById('angleVal');
-  const speedVal = document.getElementById('speedVal');
-  const distVal = document.getElementById('distVal');
-  const angleBar = document.getElementById('angleBar');
-  const bigState = document.getElementById('bigState');
-  const holdBtn = document.getElementById('holdBtn');
+/* UI refs */
+const statusEl = document.getElementById('status');
+const errorsEl = document.getElementById('errors');
+const metricsDiv = document.getElementById('metrics');
+const angleVal = document.getElementById('angleVal');
+const speedVal = document.getElementById('speedVal');
+const distVal = document.getElementById('distVal');
+const angleFill = document.getElementById('angleFill');
+const bigState = document.getElementById('bigState');
 
-  /**************************************************************************
-   * OpenCV ready handler
-   **************************************************************************/
-  function cvReady() {
-    console.log('OpenCV loaded');
-    cvReadyFlag = true;
-    libStatus.textContent = 'OpenCV.js listo';
-    initApp();
+/* botones */
+document.getElementById('btnStart').addEventListener('click', startCamera);
+document.getElementById('btnStop').addEventListener('click', stopCamera);
+document.getElementById('btnCalib').addEventListener('click', quickCalib);
+document.getElementById('btnDownload').addEventListener('click', downloadLog);
+
+/* =========================
+   HELPERS UI
+   ========================= */
+function setStatus(s) { statusEl.textContent = 'Estado: ' + s; console.log('[STATUS]', s); }
+function setError(e) { errorsEl.textContent = String(e); console.error('[ERR]', e); }
+
+/* =========================
+   OPEN CV INITIALIZATION
+   ========================= */
+function startWhenOpenCVReady() {
+  // wait until cv is available and runtime initialized
+  if (typeof cv === 'undefined') {
+    setError('OpenCV no cargado. Revisa la URL de opencv.js.');
+    return;
   }
+  if (cv.getBuildInformation) {
+    // already ready
+    afterCvReady();
+  } else {
+    setStatus('Esperando OpenCV runtime...');
+    cv['onRuntimeInitialized'] = () => {
+      afterCvReady();
+    };
+  }
+}
 
-  /**************************************************************************
-   * Inicialización: pedir cámara y preparar canvas
-   **************************************************************************/
-  async function initApp() {
-    try {
-      // pedir la cámara posterior
-      const constraints = { video: { facingMode: { exact: "environment" } , width: {ideal: 1280}, height: {ideal: 720} }, audio:false };
-      try { videoStream = await navigator.mediaDevices.getUserMedia(constraints); }
-      catch(e) { 
-        // fallback sin exact a veces es necesario
-        videoStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
-      }
+function afterCvReady() {
+  try {
+    console.log('OpenCV build info:\n', cv.getBuildInformation());
+    hasCalib3d = /calib3d/i.test(cv.getBuildInformation());
+  } catch(e) {
+    console.warn('No se pudo leer build info', e);
+    hasCalib3d = false;
+  }
+  setStatus('OpenCV listo. calib3d: ' + (hasCalib3d ? 'SI' : 'NO - fallback activado'));
+  // start camera only after user clicks Start (we don't auto-start)
+}
 
-      // crear video elemento
-      const video = document.createElement('video');
-      video.style.display = 'none';
-      document.body.appendChild(video);
-      video.srcObject = videoStream;
-      video.play();
+/* =========================
+   CAMERA CONTROL
+   ========================= */
+async function startCamera() {
+  setError('');
+  setStatus('Solicitando cámara...');
+  const constraintsExact = { video: { facingMode: { exact: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false};
+  const constraintsFallback = { video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false};
+  try {
+    try { stream = await navigator.mediaDevices.getUserMedia(constraintsExact); setStatus('Cámara iniciada (exact)'); }
+    catch(e1) { stream = await navigator.mediaDevices.getUserMedia(constraintsFallback); setStatus('Cámara iniciada (fallback)'); }
+    if (!stream) stream = await navigator.mediaDevices.getUserMedia({ video:true, audio:false});
+    video.srcObject = stream;
+    await video.play();
+    canvas.width = video.videoWidth || 1280;
+    canvas.height = video.videoHeight || 720;
+    metricsDiv.style.display = '';
+    processing = true;
+    lastTime = performance.now();
+    processLoop();
+  } catch (err) {
+    if (err && err.name) {
+      if (err.name === 'NotAllowedError') setError('Permiso denegado: permite el uso de la cámara en el navegador.');
+      else if (err.name === 'NotFoundError') setError('No se encontró cámara posterior. Prueba otro dispositivo.');
+      else if (err.name === 'OverconstrainedError') setError('Restricción de cámara no satisfecha (facingMode exact). Intenta fallback.');
+      else if (err.name === 'SecurityError') setError('Contexto no seguro: usa HTTPS o localhost.');
+      else setError(err.name + ': ' + err.message);
+    } else setError(err);
+    console.error(err);
+  }
+}
 
-      // canvas de procesado
-      const canvas = document.getElementById('canvasOut');
-      const ctx = canvas.getContext('2d');
+function stopCamera() {
+  processing = false;
+  if (stream) {
+    stream.getTracks().forEach(t => t.stop());
+    stream = null;
+    video.srcObject = null;
+    setStatus('Cámara detenida');
+  } else setStatus('No había cámara activa');
+}
 
-      // Esperar a que OpenCV esté listo
-      if (!cvReadyFlag) {
-        libStatus.textContent = 'Esperando OpenCV...';
-        const waitStart = Date.now();
-        await new Promise(resolve => {
-          const t = setInterval(() => {
-            if (cvReadyFlag || Date.now() - waitStart > 15000) {
-              clearInterval(t); resolve();
-            }
-          }, 200);
-        });
-      }
+/* =========================
+   DETECCIÓN / FALLBACK
+   ========================= */
+function hasFindChessboard() {
+  return hasCalib3d && (typeof cv.findChessboardCorners === 'function');
+}
 
-      metricsDiv.style.display = '';
-      document.getElementById('bigOverlay').style.display = '';
-
-      // inicializar audio
-      initAudio();
-
-      // Loop de procesado
-      video.addEventListener('loadeddata', () => {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        lastTime = performance.now();
-        processing = true;
-        processLoop(video, canvas, ctx);
-      });
-
-      // UI handlers
-      document.getElementById('startCalib').addEventListener('click', quickCalibrate);
-      document.getElementById('downloadLog').addEventListener('click', downloadLog);
-      setupHoldButton();
-
-      // Intento de detectar keydown de volumen
-      window.addEventListener('keydown', (ev) => {
-        // Algunos navegadores no envían info; esto es un intento de compatibilidad
-        if (ev.code === 'AudioVolumeUp') startEvaluation();
-      });
-    } catch (err) {
-      console.error('Error initApp', err);
-      libStatus.textContent = 'ERROR: ver consola';
+// fallback: detecta esquinas con goodFeaturesToTrack (no garantiza orden)
+function detectGridFallback(grayMat, expectedCount) {
+  try {
+    const maxCorners = expectedCount || (cfg.patternCols * cfg.patternRows);
+    let corners = new cv.Mat();
+    cv.goodFeaturesToTrack(grayMat, corners, maxCorners, 0.01, 10);
+    let pts = [];
+    for (let i=0; i<corners.rows; i++) {
+      pts.push([corners.data32F[i*2], corners.data32F[i*2+1]]);
     }
+    corners.delete();
+    // ordenar por Y luego X para intentar estructura en malla
+    pts.sort((a,b)=> (a[1]-b[1]) || (a[0]-b[0]));
+    return pts;
+  } catch(e) {
+    console.warn('detectGridFallback error', e);
+    return [];
   }
+}
 
-  /**************************************************************************
-   * Loop principal: cada frame intenta detectar patrón y calcular pose
-   **************************************************************************/
-  async function processLoop(video, canvas, ctx) {
-    if (!processing) return;
+/* =========================
+   PROCESS LOOP: detecta patrón / solvePnP (si es posible)
+   ========================= */
+function processLoop() {
+  if (!processing) return;
+  try {
+    // copiar frame al canvas y leer con OpenCV
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     let src = cv.imread(canvas);
     let gray = new cv.Mat();
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
-    // parámetros del patrón
-    const patternSize = new cv.Size(cfg.patternCols, cfg.patternRows);
-
-    // intentar encontrar esquinas
-    let corners = new cv.Mat();
     let found = false;
-    try {
-      found = cv.findChessboardCorners(gray, patternSize, corners, cv.CALIB_CB_ADAPTIVE_THRESH + cv.CALIB_CB_NORMALIZE_IMAGE);
-      if (found) {
-        // refinar esquinas
-        cv.cornerSubPix(gray, corners, new cv.Size(11,11), new cv.Size(-1,-1),
-                        new cv.TermCriteria(cv.TermCriteria_EPS + cv.TermCriteria_MAX_ITER, 30, 0.1));
-        // Preparar puntos 3D del patrón en mm
-        let objPoints = [];
-        for (let r = 0; r < cfg.patternRows; r++) {
-          for (let c = 0; c < cfg.patternCols; c++) {
-            // Z=0 (plano); orden consistente con corners array
-            objPoints.push([c * cfg.squareSizeMM, r * cfg.squareSizeMM, 0.0]);
-          }
-        }
-        // convertir corners a formato JS
-        let imgPoints = [];
-        for (let i = 0; i < corners.data32F.length/2; i++) {
-          let x = corners.data32F[i*2];
-          let y = corners.data32F[i*2 + 1];
-          imgPoints.push([x,y]);
-        }
+    let cornersMat = null;
 
-        // preparar cameraMatrix si no existe: estimación simple
-        if (!cameraMatrix) {
-          // estimación focal simple: f = width (en pix)
-          const f = canvas.width;
-          cameraMatrix = cv.matFromArray(3,3,cv.CV_64F,[f,0,canvas.width/2, 0,f,canvas.height/2, 0,0,1]);
-          distCoeffs = cv.Mat.zeros(1,5,cv.CV_64F);
+    // intentar ejecutar findChessboardCorners si está disponible
+    if (hasFindChessboard()) {
+      let patternSize = new cv.Size(cfg.patternCols, cfg.patternRows);
+      cornersMat = new cv.Mat();
+      try {
+        found = cv.findChessboardCorners(gray, patternSize, cornersMat, cv.CALIB_CB_ADAPTIVE_THRESH + cv.CALIB_CB_NORMALIZE_IMAGE);
+        if (found) {
+          // refinar esquinas
+          cv.cornerSubPix(gray, cornersMat, new cv.Size(11,11), new cv.Size(-1,-1),
+            new cv.TermCriteria(cv.TermCriteria_EPS + cv.TermCriteria_MAX_ITER, 30, 0.1));
         }
+      } catch(e) {
+        console.warn('findChessboardCorners lanzamiento error', e);
+        found = false;
+        cornersMat.delete && cornersMat.delete();
+        cornersMat = null;
+      }
+    } else {
+      // fallback: detectGridFallback
+      const pts = detectGridFallback(gray, cfg.patternCols * cfg.patternRows);
+      if (pts.length >= cfg.patternCols * cfg.patternRows) {
+        found = true;
+        cornersMat = cv.Mat.zeros(pts.length, 1, cv.CV_32FC2);
+        for (let i=0;i<pts.length;i++){
+          cornersMat.data32F[i*2] = pts[i][0];
+          cornersMat.data32F[i*2+1] = pts[i][1];
+        }
+      } else {
+        found = false;
+      }
+    }
 
-        // convertir a Mat para solvePnP
-        let objMat = cv.matFromArray(objPoints.length,1,cv.CV_32FC3, objPoints.flat());
-        // imgPoints -> Mat
-        let imgMat = cv.matFromArray(imgPoints.length,1,cv.CV_32FC2, imgPoints.flat());
+    if (found && cornersMat) {
+      // preparar objetos 3D (en mm)
+      let objPoints = [];
+      for (let r=0;r<cfg.patternRows;r++){
+        for (let c=0;c<cfg.patternCols;c++){
+          objPoints.push(c*cfg.squareSizeMM);
+          objPoints.push(r*cfg.squareSizeMM);
+          objPoints.push(0.0);
+        }
+      }
+      // cameraMatrix fallback simple si no calibrada
+      if (!cameraMatrix) {
+        const f = canvas.width; // estimación grosso modo
+        cameraMatrix = cv.matFromArray(3,3,cv.CV_64F, [f,0,canvas.width/2, 0,f,canvas.height/2, 0,0,1]);
+        distCoeffs = cv.Mat.zeros(1,5,cv.CV_64F);
+      }
 
-        let rvec = new cv.Mat();
-        let tvec = new cv.Mat();
-        // solvePnP
-        const useExtrinsicGuess = false;
-        const success = cv.solvePnP(objMat, imgMat, cameraMatrix, distCoeffs, rvec, tvec, useExtrinsicGuess, cv.SOLVEPNP_ITERATIVE);
+      // construir Mats para solvePnP: objPoints Nx1 CV_32FC3, imgPoints Nx1 CV_32FC2
+      let objMat = cv.matFromArray(cfg.patternCols*cfg.patternRows, 1, cv.CV_32FC3, objPoints);
+      // cornersMat ya tiene formato Nx1 CV_32FC2 o CV_32FC2 según build; si no, convertir
+      let imgMat = cornersMat;
+
+      // rvec, tvec
+      let rvec = new cv.Mat(), tvec = new cv.Mat();
+      try {
+        const success = cv.solvePnP(objMat, imgMat, cameraMatrix, distCoeffs, rvec, tvec, false, cv.SOLVEPNP_ITERATIVE);
         if (success) {
-          // convert rvec to rotation matrix / Euler angles
+          // rot matrix
           let rotMat = new cv.Mat();
           cv.Rodrigues(rvec, rotMat);
-
-          // calcular ángulos Euler (ZYX) — función helper
           const euler = rotMatToEuler(rotMat);
-
-          // calcular distancia Z en mm desde tvec (ya está en mm si objPoints usan mm y la cámara está en la misma escala)
-          const zmm = tvec.data64F ? tvec.data64F[2] : (tvec.data64F ? tvec.data64F[2] : tvec.data64F);
-
-          // tiempo y velocidad
           const now = performance.now();
-          const dt = (now - (lastTime || now))/1000.0;
+          const dt = (now - (lastTime||now))/1000.0;
           lastTime = now;
 
-          // calcular velocidades (traslacional) usando historial
+          const zmm = tvec.data64F ? tvec.data64F[2] : (tvec.data32F ? tvec.data32F[2] : tvec.data[2]);
           let speed = 0;
           if (lastPose) {
-            const dx = tvec.data64F[0] - lastPose.t[0];
-            const dy = tvec.data64F[1] - lastPose.t[1];
-            const dz = tvec.data64F[2] - lastPose.t[2];
-            const dist = Math.sqrt(dx*dx+dy*dy+dz*dz);
+            const dx = (tvec.data64F? tvec.data64F[0] : tvec.data32F? tvec.data32F[0]:0) - (lastPose.t[0]||0);
+            const dy = (tvec.data64F? tvec.data64F[1] : tvec.data32F? tvec.data32F[1]:0) - (lastPose.t[1]||0);
+            const dz = (tvec.data64F? tvec.data64F[2] : tvec.data32F? tvec.data32F[2]:0) - (lastPose.t[2]||0);
+            const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
             speed = dt>0 ? dist/dt : 0;
           }
+          const anglePitch = euler.pitch;
+          const angleSmooth = smooth(anglePitch, lastPose?lastPose.angles.pitch:null, cfg.smoothingAlpha);
+          const distSmooth = smooth(zmm, lastPose?lastPose.t[2]:null, cfg.smoothingAlpha);
+          const speedSmooth = smooth(speed, lastPose?lastPose.speed:null, cfg.smoothingAlpha);
 
-          // suavizado
-          const angleZ = smoothValue(euler.pitch, lastPose ? lastPose.angles.pitch : null, cfg.smoothingAlpha);
-          const distSmooth = smoothValue(zmm, lastPose ? lastPose.t[2] : null, cfg.smoothingAlpha);
-          const speedSmooth = smoothValue(speed, lastPose ? lastPose.speed : null, cfg.smoothingAlpha);
+          updateUI(angleSmooth, speedSmooth, distSmooth);
 
-          // actualizar UI
-          updateUI(angleZ, speedSmooth, distSmooth);
-
-          // registrar en historial
-          const pose = {
-            t: [tvec.data64F[0], tvec.data64F[1], tvec.data64F[2]],
-            r: [rvec.data64F[0], rvec.data64F[1], rvec.data64F[2]],
-            angles: euler,
-            time: now,
-            speed: speedSmooth
-          };
+          const pose = { t: [ tvec.data64F? tvec.data64F[0] : (tvec.data32F? tvec.data32F[0]:0),
+                                tvec.data64F? tvec.data64F[1] : (tvec.data32F? tvec.data32F[1]:0),
+                                tvec.data64F? tvec.data64F[2] : (tvec.data32F? tvec.data32F[2]:0) ],
+                         r: [ rvec.data64F? rvec.data64F[0]:(rvec.data32F? rvec.data32F[0]:0),
+                              rvec.data64F? rvec.data64F[1]:(rvec.data32F? rvec.data32F[1]:0),
+                              rvec.data64F? rvec.data64F[2]:(rvec.data32F? rvec.data32F[2]:0) ],
+                         angles: euler,
+                         speed: speedSmooth,
+                         time: now };
           lastPose = pose;
           poseHistory.push(pose);
-          // mantener historial corto
-          if (poseHistory.length > 200) poseHistory.shift();
+          if (poseHistory.length>200) poseHistory.shift();
 
-          // si estamos evaluando -> registrar en log y evaluar fuera de rango
           if (evaluating) {
-            const rec = { time: now, angle: angleZ, speed: speedSmooth, dist: distSmooth };
-            log.push(rec);
-            // alarmas
-            if (angleZ > cfg.angleMax) {
-              playHighBeep();
-              showState('Fuera (alto)', 'red');
-            } else if (angleZ < cfg.angleMin) {
-              playLowBeep();
-              showState('Fuera (bajo)', 'red');
-            } else {
-              stopBeep();
-              showState('Dentro de rango', 'green');
-            }
+            logData.push({time: now, angle: angleSmooth, speed: speedSmooth, dist: distSmooth});
+            // alarmas (puedes integrar audio)
+            if (angleSmooth > cfg.angleMax) bigState.textContent = 'Fuera (alto)';
+            else if (angleSmooth < cfg.angleMin) bigState.textContent = 'Fuera (bajo)';
+            else bigState.textContent = 'Dentro';
           }
-        } // end success
 
-        // liberar Mats
-        objMat.delete(); imgMat.delete(); corners.delete(); rvec.delete(); tvec.delete();
-        rotMat && rotMat.delete();
-      } else {
-        // no encontrado: mostrar advertencia y stop beeps
-        showState('Patrón no encontrado', 'orange');
-        stopBeep();
+          rotMat.delete();
+        } else {
+          bigState.textContent = 'solvePnP falló';
+        }
+      } catch(e) {
+        console.warn('solvePnP error', e);
+      } finally {
+        rvec.delete(); tvec.delete(); objMat.delete();
       }
-    } catch (err) {
-      console.error('processFrame err', err);
-    } finally {
-      src.delete(); gray.delete(); corners && corners.delete();
-    }
-
-    // siguiente frame (no usar requestAnimationFrame si OpenCV bloquea; usar setTimeout para control)
-    setTimeout(() => { processLoop(video, canvas, ctx); }, cfg.sampleIntervalMs);
-  }
-
-  /**************************************************************************
-   * Helpers: convertir rot matrix -> Euler (pitch, yaw, roll) en grados
-   **************************************************************************/
-  function rotMatToEuler(R) {
-    // R es Mat 3x3
-    // Referencia: extraccion de ángulos en ZYX
-    const r = R.data64F || R.data32F;
-    // r is [r00,r01,r02, r10,r11,r12, r20,r21,r22]
-    const r00 = r[0], r01 = r[1], r02 = r[2];
-    const r10 = r[3], r11 = r[4], r12 = r[5];
-    const r20 = r[6], r21 = r[7], r22 = r[8];
-    let sy = Math.sqrt(r00*r00 + r10*r10);
-    let singular = sy < 1e-6;
-    let x, y, z;
-    if (!singular) {
-      x = Math.atan2(r21, r22);
-      y = Math.atan2(-r20, sy);
-      z = Math.atan2(r10, r00);
     } else {
-      x = Math.atan2(-r12, r11);
-      y = Math.atan2(-r20, sy);
-      z = 0;
+      bigState.textContent = 'Patrón no detectado';
+      updateUI(null,null,null);
     }
-    // convert rad->deg
-    return { roll: x*180/Math.PI, pitch: y*180/Math.PI, yaw: z*180/Math.PI };
-  }
 
-  /**************************************************************************
-   * UI updates y sonidos
-   **************************************************************************/
-  function updateUI(angle, speed, dist) {
-    angleVal.textContent = angle===null? '—' : angle.toFixed(1);
-    speedVal.textContent = speed===null? '—' : Math.round(speed);
-    distVal.textContent = dist===null? '—' : Math.round(dist);
+    // liberar
+    src.delete(); gray.delete();
+    if (cornersMat) cornersMat.delete();
 
-    // barra del ángulo entre -maxRange...+maxRange
-    const span = Math.max(Math.abs(cfg.angleMin), Math.abs(cfg.angleMax));
-    const pct = Math.min(100, Math.abs(angle)/span*100);
-    angleBar.style.width = pct + '%';
-    if (angle < cfg.angleMin) angleBar.style.background = '#b22222'; // rojo
-    else if (angle > cfg.angleMax) angleBar.style.background = '#ffcc00'; // amarillo
-    else angleBar.style.background = '#22aa22'; // verde
+  } catch (err) {
+    console.error('processLoop err', err);
+    setError(String(err));
+  } finally {
+    // siguiente
+    setTimeout(processLoop, cfg.sampleMs);
   }
+}
 
-  function showState(text, color) {
-    bigState.textContent = 'Estado: ' + text;
-    bigState.style.color = color;
+/* =========================
+   UTILIDADES: rotMat -> Euler, smoothing, UI update
+   ========================= */
+function rotMatToEuler(R) {
+  // R Mat 3x3; puede ser data64F o data32F
+  const r = R.data64F || R.data32F;
+  const r00=r[0], r01=r[1], r02=r[2], r10=r[3], r11=r[4], r12=r[5], r20=r[6], r21=r[7], r22=r[8];
+  let sy = Math.sqrt(r00*r00 + r10*r10);
+  let singular = sy < 1e-6;
+  let x,y,z;
+  if (!singular) {
+    x = Math.atan2(r21, r22);
+    y = Math.atan2(-r20, sy);
+    z = Math.atan2(r10, r00);
+  } else {
+    x = Math.atan2(-r12, r11);
+    y = Math.atan2(-r20, sy);
+    z = 0;
   }
+  return { roll: x*180/Math.PI, pitch: y*180/Math.PI, yaw: z*180/Math.PI };
+}
 
-  /**************************************************************************
-   * Audio: beeps y ruido de soldadura
-   **************************************************************************/
-  function initAudio() {
-    try {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      // osciladores para beep alto / bajo
-      highOsc = audioCtx.createOscillator(); highOsc.type = 'sine'; highOsc.frequency.value = 1200;
-      lowOsc = audioCtx.createOscillator(); lowOsc.type = 'sine'; lowOsc.frequency.value = 300;
-      const highGain = audioCtx.createGain(); highGain.gain.value = 0;
-      const lowGain = audioCtx.createGain(); lowGain.gain.value = 0;
-      highOsc.connect(highGain); highGain.connect(audioCtx.destination);
-      lowOsc.connect(lowGain); lowGain.connect(audioCtx.destination);
-      highOsc.start(); lowOsc.start();
-      // ruido de soldadura (ruido blanco simples)
-      const bufferSize = 2 * audioCtx.sampleRate;
-      const noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
-      let data = noiseBuffer.getChannelData(0);
-      for (let i=0;i<bufferSize;i++) data[i] = (Math.random()*2-1)*0.3;
-      weldNoiseNode = audioCtx.createBufferSource();
-      weldNoiseNode.buffer = noiseBuffer;
-      weldNoiseNode.loop = true;
-      const weldGain = audioCtx.createGain(); weldGain.gain.value = 0;
-      weldNoiseNode.connect(weldGain); weldGain.connect(audioCtx.destination);
-      weldNoiseNode.start();
+function smooth(v, prev, a) { if (prev==null || prev==undefined) return v; return a*v + (1-a)*prev; }
 
-      // keep references
-      highOsc._gain = highGain;
-      lowOsc._gain = lowGain;
-      weldNoiseNode._gain = weldGain;
-    } catch (err) {
-      console.warn('Audio init error', err);
-    }
-  }
+function updateUI(angle, speed, dist) {
+  angleVal.textContent = angle==null? '—' : angle.toFixed(1);
+  speedVal.textContent = speed==null? '—' : Math.round(speed);
+  distVal.textContent = dist==null? '—' : Math.round(dist);
+  // barra de ángulo relativa
+  const span = Math.max(Math.abs(cfg.angleMin), Math.abs(cfg.angleMax)) || 20;
+  const pct = angle==null? 0 : Math.min(100, Math.abs(angle)/span*100);
+  angleFill.style.width = pct + '%';
+  if (angle==null) angleFill.style.background = '#666';
+  else if (angle < cfg.angleMin) angleFill.style.background = '#b22222';
+  else if (angle > cfg.angleMax) angleFill.style.background = '#ffcc00';
+  else angleFill.style.background = '#22aa22';
+}
 
-  function playHighBeep() {
-    if (!audioCtx) return;
-    audioCtx.resume();
-    highOsc._gain.gain.value = 0.08;
-    lowOsc._gain.gain.value = 0;
-  }
-  function playLowBeep() {
-    if (!audioCtx) return;
-    audioCtx.resume();
-    lowOsc._gain.gain.value = 0.08;
-    highOsc._gain.gain.value = 0;
-  }
-  function stopBeep() {
-    if (!audioCtx) return;
-    highOsc._gain.gain.value = 0;
-    lowOsc._gain.gain.value = 0;
-  }
-  function startWeldNoise() {
-    if (!audioCtx) return;
-    audioCtx.resume();
-    weldNoiseNode._gain.gain.value = 0.12;
-  }
-  function stopWeldNoise() {
-    if (!audioCtx) return;
-    weldNoiseNode._gain.gain.value = 0;
-  }
+/* =========================
+   CALIBRACIÓN RÁPIDA & LOG
+   ========================= */
+function quickCalib() {
+  const d = prompt('Coloca el patrón a una distancia conocida (mm). Ej: 500', '500');
+  if (!d) return alert('Se canceló calibración rápida.');
+  const distMm = parseFloat(d);
+  if (isNaN(distMm) || distMm<=0) return alert('Distancia inválida');
+  // estimación: establecer focal basada en suposición que patrón ocupa ~ width pix
+  // Esta es solo una estimación rápida; para precisión usa calibrateCamera offline.
+  const f = canvas.width * (distMm / (cfg.patternCols * cfg.squareSizeMM));
+  cameraMatrix = cv.matFromArray(3,3,cv.CV_64F, [f,0,canvas.width/2, 0,f,canvas.height/2, 0,0,1]);
+  distCoeffs = cv.Mat.zeros(1,5,cv.CV_64F);
+  setStatus('Calibración rápida aplicada (estimada).');
+}
 
-  /**************************************************************************
-   * Evaluación: inicio / fin
-   **************************************************************************/
-  function startEvaluation() {
-    if (evaluating) return;
-    evaluating = true;
-    log = [];
-    startWeldNoise();
-    showState('Evaluando...', 'lightgreen');
-    // beep start
-    // (pequeño beep)
-    if (audioCtx) { audioCtx.resume(); highOsc._gain.gain.value = 0.04; setTimeout(()=>highOsc._gain.gain.value=0,200); }
-  }
-  function stopEvaluation() {
-    if (!evaluating) return;
-    evaluating = false;
-    stopWeldNoise();
-    stopBeep();
-    showState('Evaluación finalizada', '#fff');
-    // beep stop
-    if (audioCtx) { audioCtx.resume(); lowOsc._gain.gain.value = 0.04; setTimeout(()=>lowOsc._gain.gain.value=0,200); }
-    // guardar log
-    console.log('Log generado', log);
-  }
+/* =========================
+   EVALUACIÓN / LOG
+   ========================= */
+function startEval() { evaluating = true; logData = []; setStatus('Evaluando...'); }
+function stopEval() { evaluating = false; setStatus('Evaluación finalizada. Registros: ' + logData.length); }
 
-  /**************************************************************************
-   * Hold button comportamiento (touch + mouse)
-   **************************************************************************/
-  function setupHoldButton() {
-    // touch & mouse handlers
-    holdBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startEvaluation(); });
-    holdBtn.addEventListener('mousedown', (e) => { e.preventDefault(); startEvaluation(); });
-    holdBtn.addEventListener('touchend', (e) => { e.preventDefault(); stopEvaluation(); });
-    holdBtn.addEventListener('mouseup', (e) => { e.preventDefault(); stopEvaluation(); });
-    // long-press keyboard fallback
-    window.addEventListener('keydown', (e) => {
-      if (e.code === 'Space') startEvaluation();
-    });
-    window.addEventListener('keyup', (e) => {
-      if (e.code === 'Space') stopEvaluation();
-    });
-  }
+function downloadLog() {
+  const blob = new Blob([JSON.stringify(logData, null, 2)], {type: 'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'soldadura_log.json'; a.click();
+  URL.revokeObjectURL(url);
+}
 
-  /**************************************************************************
-   * Quick calibrate: estimación simple de cámara o pedir input del usuario
-   **************************************************************************/
-  function quickCalibrate() {
-    // Pide al usuario que coloque el patrón a una distancia conocida (ej: 500 mm)
-    const d = prompt('Coloca el patrón a una distancia conocida (mm) y escribe la distancia, o deja vacío para usar estimación.', '500');
-    if (!d) { alert('Usando calibración por defecto. Para mayor precisión, haz calibración offline.'); return; }
-    const distMm = parseFloat(d);
-    if (isNaN(distMm) || distMm <= 0) return alert('Distancia inválida');
-    // estimación focal: f = (pixel_size * dist_mm) / real_size_mm -> simplificamos a f = width * (dist/realWidth)
-    // como simplificación pedimos ancho aproximado del patrón en pix actualmente visible
-    alert('Coloca el patrón centrado y pulsa OK para medir su ancho en pix.');
-    // medimos en el último frame (usar lastPose)
-    if (!lastPose) return alert('No se detectó el patrón. Asegúrate de que el patrón esté visible.');
-    // estimación simple: mantener cameraMatrix y asumir f = canvas.width * dist / (patternWidthMM)
-    const patternPxWidth = cfg.patternCols * cfg.squareSizeMM; // aprox (not exact)
-    const f = window.innerWidth; // fallback
-    cameraMatrix = cv.matFromArray(3,3,cv.CV_64F,[f,0,window.innerWidth/2, 0,f,window.innerHeight/2, 0,0,1]);
-    distCoeffs = cv.Mat.zeros(1,5,cv.CV_64F);
-    alert('Calibración rápida aplicada (estimación). Para resultados precisos realiza calibración de cámara con OpenCV offline.');
-  }
+/* =========================
+   ON LOAD
+   ========================= */
+window.addEventListener('load', () => {
+  startWhenOpenCVReady();
+  setStatus('Listo. Haz click en "Iniciar cámara". Si OpenCV no tiene calib3d, se usará un fallback.');
+});
 
-  /**************************************************************************
-   * Utilitarios
-   **************************************************************************/
-  function smoothValue(val, prev, alpha) {
-    if (prev === null || prev === undefined) return val;
-    return alpha * val + (1-alpha) * prev;
-  }
+/* =========================
+   UTIL - DEBUG: mostrar build info en consola
+   ========================= */
+window.showCvInfo = function() {
+  try { console.log(cv.getBuildInformation()); } catch(e) { console.warn('cv info no disponible', e); }
+};
 
-  function downloadLog() {
-    const blob = new Blob([JSON.stringify(log, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = 'soldar_log.json'; a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  /**************************************************************************
-   * Beep management helpers (short)
-   **************************************************************************/
-  function playShortBeep(freq=800, dur=120) {
-    if (!audioCtx) return;
-    const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
-    o.connect(g); g.connect(audioCtx.destination);
-    o.type = 'sine'; o.frequency.value = freq; g.gain.value = 0.08;
-    o.start(); setTimeout(()=>{ o.stop(); g.disconnect(); o.disconnect(); }, dur);
-  }
-
-  </script>
-
+</script>
 </body>
 </html>
