@@ -15,7 +15,10 @@
 
   <style>
     html,body { height:100%; margin:0; background:#111; color:#eee; font-family:Arial,Helvetica,sans-serif; }
-    #videoWrap { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:#000; z-index:1; }
+    /* pon el video por encima de la escena AR */
+    #videoWrap { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:#000; z-index:999; }
+    a-scene { position:fixed; inset:0; z-index: 1; pointer-events: none; } /* AR en fondo, sin capturar clicks */
+
     video#videoInput { width:100%; height:100%; object-fit:cover; background:#000; }
     #ui { position: absolute; left:10px; top:10px; z-index:999; background: rgba(0,0,0,0.55); padding:10px; border-radius:10px; min-width:260px; }
     button { padding:8px 12px; border-radius:8px; border: none; background:#0a84ff; color:white; font-weight:600; margin:4px 2px; }
@@ -148,34 +151,125 @@ function afterCvReady() {
 /* =========================
    CAMERA CONTROL
    ========================= */
+// Reemplaza tu startCamera() por esta versión robusta
 async function startCamera() {
   setError('');
-  setStatus('Solicitando cámara...');
-  const constraintsExact = { video: { facingMode: { exact: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false};
-  const constraintsFallback = { video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false};
+  setStatus('Buscando dispositivos de cámara...');
+  // Si ya hay un stream abierto, ciérralo primero
+  try { if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; video.srcObject = null; } } catch(e){ console.warn('Error cerrando stream previo', e); }
+
+  // Obtener lista de dispositivos y elegir un candidate deviceId para la cámara trasera si existe
+  let devices = [];
   try {
-    try { stream = await navigator.mediaDevices.getUserMedia(constraintsExact); setStatus('Cámara iniciada (exact)'); }
-    catch(e1) { stream = await navigator.mediaDevices.getUserMedia(constraintsFallback); setStatus('Cámara iniciada (fallback)'); }
-    if (!stream) stream = await navigator.mediaDevices.getUserMedia({ video:true, audio:false});
-    video.srcObject = stream;
-    await video.play();
+    devices = await navigator.mediaDevices.enumerateDevices();
+  } catch (e) {
+    console.warn('enumerateDevices falló', e);
+  }
+  const videoInputs = devices.filter(d => d.kind === 'videoinput');
+  console.log('videoInputs disponibles:', videoInputs);
+  let chosenDeviceId = null;
+
+  // intentar preferir un label con "back" o "rear" o "environment" si están presentes
+  for (const d of videoInputs) {
+    const lab = (d.label || '').toLowerCase();
+    if (lab.includes('back') || lab.includes('rear') || lab.includes('environment')) {
+      chosenDeviceId = d.deviceId;
+      break;
+    }
+  }
+  // si no encontramos por label, tomamos el primero
+  if (!chosenDeviceId && videoInputs.length) chosenDeviceId = videoInputs[0].deviceId;
+
+  // Si no hay devices, informar claramente
+  if (!chosenDeviceId) {
+    setError('No se encontraron dispositivos de video en este equipo. Revisa permisos o hardware.');
+    setStatus('Sin dispositivo de cámara');
+    return;
+  }
+
+  // lista de constraints a intentar (de mayor a menor)
+  const constraintAttempts = [
+    { video: { deviceId: { exact: chosenDeviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
+    { video: { deviceId: { exact: chosenDeviceId }, width: { ideal: 640 }, height: { ideal: 480 } }, audio: false },
+    { video: { deviceId: { exact: chosenDeviceId } }, audio: false }, // cualquier resolución
+    // fallback: intentar sin deviceId (que deje elegir al navegador)
+    { video: { facingMode: "environment", width: { ideal: 640 }, height: { ideal: 480 } }, audio: false },
+    { video: true, audio: false }
+  ];
+
+  // función interna para intentar obtener stream con reintentos
+  async function tryConstraintsList(constraintsList, maxRetries = 3) {
+    for (let i = 0; i < constraintsList.length; i++) {
+      const c = constraintsList[i];
+      let attempt = 0;
+      let backoff = 300;
+      while (attempt < maxRetries) {
+        try {
+          setStatus(`Intentando cámara (modo ${i+1}/${constraintsList.length}, intento ${attempt+1})...`);
+          const s = await navigator.mediaDevices.getUserMedia(c);
+          // al llegar aquí, éxito: asignar y salir
+          stream = s;
+          video.srcObject = stream;
+          await video.play().catch(err => console.warn('video.play() rejected', err));
+          setStatus('Cámara iniciada correctamente');
+          // mostrar settings
+          try {
+            const track = stream.getVideoTracks()[0];
+            const settings = track.getSettings && track.getSettings();
+            if (settings) setStatus(`Cámara: ${settings.width}x${settings.height} - facingMode: ${settings.facingMode || 'n/a'}`);
+          } catch (e) { /* no crítico */ }
+          return true;
+        } catch (err) {
+          console.warn('getUserMedia intento error', err);
+          // Manejo específico de errores
+          if (err && err.name === 'NotReadableError') {
+            // puede ser cámara en uso -> reintentar con backoff
+            setError('NotReadableError: la cámara parece estar ocupada por otra app. Cierra otras apps y reintenta.');
+            // corta: reintenta unas pocas veces
+            await new Promise(r => setTimeout(r, backoff));
+            attempt++;
+            backoff *= 1.8;
+            continue;
+          } else if (err && (err.name === 'OverconstrainedError' || err.name === 'ConstraintNotSatisfiedError')) {
+            // ese constraint no se puede cumplir: pasar al siguiente constraintsList
+            setError('OverconstrainedError: la resolución o constraint no es soportada. Probando otra configuración.');
+            console.warn('Constraint no satisfecho, pasando al siguiente constraint.');
+            break; // break inner loop y probar siguiente constraints
+          } else if (err && err.name === 'NotAllowedError') {
+            setError('Permiso denegado: permite el uso de cámara en el diálogo del navegador y en ajustes del dispositivo.');
+            return false;
+          } else if (err && err.name === 'SecurityError') {
+            setError('SecurityError: contexto no seguro (usa HTTPS o localhost).');
+            return false;
+          } else {
+            setError('Error abriendo la cámara: ' + (err && err.message ? err.message : String(err)));
+            // reintentar 1 vez más por si acaso
+            attempt++;
+            await new Promise(r => setTimeout(r, backoff));
+            backoff *= 1.8;
+          }
+        }
+      } // end while attempts
+      // si llegamos aquí sin return, probar siguiente constraint
+    } // end for constraintsList
+    return false;
+  }
+
+  const ok = await tryConstraintsList(constraintAttempts, 3);
+  if (!ok) {
+    setStatus('No pudo iniciarse la cámara con las configuraciones probadas.');
+    // sugerencia final para el usuario
+    errorsEl.textContent += '\nSi el problema persiste: 1) cierra apps que usen la cámara, 2) reinicia el dispositivo, 3) prueba con otro navegador (Chrome/Edge), 4) revisa permisos de cámara.';
+  } else {
+    // configurar canvas tamaño real y lanzar procesado si corresponde
     canvas.width = video.videoWidth || 1280;
     canvas.height = video.videoHeight || 720;
-    metricsDiv.style.display = '';
     processing = true;
     lastTime = performance.now();
     processLoop();
-  } catch (err) {
-    if (err && err.name) {
-      if (err.name === 'NotAllowedError') setError('Permiso denegado: permite el uso de la cámara en el navegador.');
-      else if (err.name === 'NotFoundError') setError('No se encontró cámara posterior. Prueba otro dispositivo.');
-      else if (err.name === 'OverconstrainedError') setError('Restricción de cámara no satisfecha (facingMode exact). Intenta fallback.');
-      else if (err.name === 'SecurityError') setError('Contexto no seguro: usa HTTPS o localhost.');
-      else setError(err.name + ': ' + err.message);
-    } else setError(err);
-    console.error(err);
   }
 }
+
 
 function stopCamera() {
   processing = false;
